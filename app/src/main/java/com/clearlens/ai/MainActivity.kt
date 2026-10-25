@@ -345,8 +345,23 @@ class MainActivity : ComponentActivity() {
         }.setNegativeButton("Close",null).show()
     }
 
-    private fun decodeScaledBitmap(uri:Uri):Bitmap =
-        decodeImageSource(ImageDecoder.createSource(contentResolver,uri))
+    private fun decodeScaledBitmap(uri:Uri):Bitmap {
+        // Some gallery providers return formats or streams that ImageDecoder cannot read.
+        // Try ImageDecoder first, then fall back to BitmapFactory using the content URI stream.
+        try {
+            return decodeImageSource(ImageDecoder.createSource(contentResolver,uri))
+        } catch (_:Exception) {
+            val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true}
+            contentResolver.openInputStream(uri)?.use{BitmapFactory.decodeStream(it,null,bounds)}
+                ?: throw IOException("Could not open selected photo")
+            if(bounds.outWidth<=0 || bounds.outHeight<=0) throw IOException("Unsupported image format")
+            var sample=1
+            while(bounds.outWidth/sample>2500 || bounds.outHeight/sample>2500) sample*=2
+            val options=BitmapFactory.Options().apply{inSampleSize=sample;inPreferredConfig=Bitmap.Config.ARGB_8888}
+            return contentResolver.openInputStream(uri)?.use{BitmapFactory.decodeStream(it,null,options)}
+                ?: throw IOException("Could not decode selected photo")
+        }
+    }
 
     private fun decodeScaledBitmap(file:File):Bitmap =
         decodeImageSource(ImageDecoder.createSource(file))
@@ -368,6 +383,8 @@ class MainActivity : ComponentActivity() {
             var enhancedImage:Bitmap?=null
             try{
                 source=decodeScaledBitmap(file)
+                // Preserve the captured source as a separate gallery item before enhancement.
+                saveBitmapToGallery(source,"ClearLens_${stamp()}_original.jpg")
                 enhancedImage=improveBitmap(source,if(hdrEnabled)68 else 48)
                 saveBitmapToGallery(enhancedImage,"ClearLens_${stamp()}_enhanced.jpg")
                 runOnUiThread{cameraStatus.text="Photo enhanced · Pictures/ClearLens AI";captureButton.isEnabled=true;toast("Photo enhanced and saved.")}
