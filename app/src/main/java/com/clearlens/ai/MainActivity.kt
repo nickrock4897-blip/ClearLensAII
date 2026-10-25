@@ -100,20 +100,17 @@ class MainActivity : ComponentActivity() {
         cameraPage=LinearLayout(this).apply{orientation=1;setBackgroundColor(Color.BLACK)}
         cameraPage.addView(top)
         cameraPreview=PreviewView(this).apply{scaleType=PreviewView.ScaleType.FILL_CENTER;implementationMode=PreviewView.ImplementationMode.COMPATIBLE;setBackgroundColor(Color.BLACK)}
-        var downX=0f
+        var touchStartX=0f
         cameraPreview.setOnTouchListener { _, event ->
             when(event.action) {
-                android.view.MotionEvent.ACTION_DOWN -> { downX=event.x; true }
+                android.view.MotionEvent.ACTION_DOWN -> { touchStartX=event.x; true }
                 android.view.MotionEvent.ACTION_UP -> {
-                    val dx=event.x-downX
-                    if(abs(dx)>dp(75)) {
-                        setVideoMode(dx<0)
-                    } else {
-                        try {
-                            val point=cameraPreview.meteringPointFactory.createPoint(event.x,event.y)
-                            cameraControl?.startFocusAndMetering(FocusMeteringAction.Builder(point).build())
-                        } catch (_:Exception) {}
-                    }
+                    val delta=event.x-touchStartX
+                    if(abs(delta)>dp(75)) setVideoMode(delta<0)
+                    else try {
+                        val point=cameraPreview.meteringPointFactory.createPoint(event.x,event.y)
+                        cameraControl?.startFocusAndMetering(FocusMeteringAction.Builder(point).build())
+                    } catch (_:Exception) {}
                     true
                 }
                 else -> true
@@ -123,142 +120,12 @@ class MainActivity : ComponentActivity() {
         cameraStatus=label("Camera starting…",11f,Color.LTGRAY).apply{gravity=Gravity.CENTER;setPadding(dp(8),dp(3),dp(8),dp(3));setBackgroundColor(Color.BLACK)}
         cameraPage.addView(cameraStatus,LinearLayout.LayoutParams(-1,dp(22)))
         val modes=LinearLayout(this).apply{orientation=0;gravity=Gravity.CENTER;setPadding(dp(48),0,dp(48),0);setBackgroundColor(Color.BLACK)}
-        modeVideoLabel=modeText("VIDEO") { setVideoMode(true) }
-        modePhotoLabel=modeText("PHOTO") { setVideoMode(false) }
+        modeVideoLabel=modeText("VIDEO"){setVideoMode(true)}
+        modePhotoLabel=modeText("PHOTO"){setVideoMode(false)}
         modes.addView(modeVideoLabel,LinearLayout.LayoutParams(0,dp(48),1f))
         modes.addView(modePhotoLabel,LinearLayout.LayoutParams(0,dp(48),1f))
         cameraPage.addView(modes)
-        refreshModeStrip() android.Manifest
-import android.content.ContentValues
-import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.ImageDecoder
-import android.graphics.Color
-import android.net.Uri
-import android.os.Bundle
-import android.provider.MediaStore
-import android.view.Gravity
-import android.view.View
-import android.widget.*
-import androidx.activity.ComponentActivity
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.*
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.video.*
-import androidx.camera.view.PreviewView
-import androidx.core.content.ContextCompat
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MimeTypes
-import androidx.media3.common.util.UnstableApi
-import androidx.media3.effect.Brightness
-import androidx.media3.effect.Contrast
-import androidx.media3.transformer.*
-import java.io.File
-import java.io.FileInputStream
-import java.io.IOException
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
-import kotlin.concurrent.thread
-import kotlin.math.max
-import kotlin.math.abs
-
-class MainActivity : ComponentActivity() {
-    private val bg=Color.rgb(12,16,27)
-    private val panel=Color.rgb(24,31,47)
-    private val mint=Color.rgb(114,240,205)
-    private val muted=Color.rgb(168,181,200)
-    private lateinit var root:LinearLayout
-    private lateinit var cameraPage:LinearLayout
-    private lateinit var cameraPreview:PreviewView
-    private lateinit var cameraStatus:TextView
-    private lateinit var captureButton:TextView
-    private lateinit var editorPage:LinearLayout
-    private lateinit var originalPreview:ImageView
-    private lateinit var resultPreview:ImageView
-    private lateinit var editStatus:TextView
-    private lateinit var progress:ProgressBar
-    private lateinit var strengthLabel:TextView
-    private lateinit var enhanceButton:Button
-    private lateinit var saveButton:Button
-    private var imageCapture:ImageCapture?=null
-    private var cameraControl:CameraControl?=null
-    private lateinit var modePhotoLabel:TextView
-    private lateinit var modeVideoLabel:TextView
-    private var videoCapture:VideoCapture<Recorder>?=null
-    private var recording:Recording?=null
-    private var videoMode=false
-    private var frontCamera=false
-    private var flashEnabled=false
-    private var hdrEnabled=true
-    private var selectedVideo:Uri?=null
-    private var original:Bitmap?=null
-    private var enhanced:Bitmap?=null
-    private var strength=45
-    private val cameraExecutor:ExecutorService=Executors.newSingleThreadExecutor()
-
-    private val permissionLauncher=registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()){ result ->
-        if(result[Manifest.permission.CAMERA]==true) startCamera()
-        else cameraStatus.text="Allow camera access in Android settings to use the camera."
-    }
-    private val imagePicker=registerForActivityResult(ActivityResultContracts.PickVisualMedia()){ uri-> if(uri!=null) loadImage(uri) }
-    private val videoPicker=registerForActivityResult(ActivityResultContracts.PickVisualMedia()){ uri->
-        if(uri!=null){selectedVideo=uri;original=null;enhanced=null;showEditor();editStatus.text="Video selected. Export an enhanced MP4.";addEditorControls(true)}
-    }
-
-    override fun onCreate(savedInstanceState:Bundle?){
-        super.onCreate(savedInstanceState)
-        window.statusBarColor=bg;window.navigationBarColor=bg
-        buildUI()
-        if(hasCameraPermission())startCamera() else permissionLauncher.launch(arrayOf(Manifest.permission.CAMERA,Manifest.permission.RECORD_AUDIO))
-    }
-
-    private fun buildUI(){
-        window.statusBarColor=Color.BLACK;window.navigationBarColor=Color.BLACK
-        root=LinearLayout(this).apply{orientation=1;setBackgroundColor(Color.BLACK);setPadding(0,0,0,dp(4))}
-        val top=LinearLayout(this).apply{orientation=0;gravity=Gravity.CENTER_VERTICAL;setPadding(dp(12),dp(6),dp(12),dp(6));setBackgroundColor(Color.BLACK)}
-        top.addView(makeButton("⚡",false){flashEnabled=!flashEnabled;imageCapture?.flashMode=if(flashEnabled)ImageCapture.FLASH_MODE_ON else ImageCapture.FLASH_MODE_OFF;toast(if(flashEnabled)"Flash on" else "Flash off")},LinearLayout.LayoutParams(dp(48),dp(44)))
-        top.addView(makeButton("◎",false){toast("Tap the preview to focus where supported")},LinearLayout.LayoutParams(dp(48),dp(44)))
-        top.addView(View(this),LinearLayout.LayoutParams(0,1,1f))
-        top.addView(makeButton("HDR",false){hdrEnabled=!hdrEnabled;toast(if(hdrEnabled)"HDR preference on" else "HDR preference off")},LinearLayout.LayoutParams(dp(58),dp(44)))
-        top.addView(makeButton("⚙",false){showSettings()},LinearLayout.LayoutParams(dp(44),dp(44)))
-        cameraPage=LinearLayout(this).apply{orientation=1;setBackgroundColor(Color.BLACK)}
-        cameraPage.addView(top)
-        cameraPreview=PreviewView(this).apply{scaleType=PreviewView.ScaleType.FILL_CENTER;implementationMode=PreviewView.ImplementationMode.COMPATIBLE;setBackgroundColor(Color.BLACK)}
-        var downX=0f
-        cameraPreview.setOnTouchListener { _, event ->
-            when(event.action) {
-                android.view.MotionEvent.ACTION_DOWN -> { downX=event.x; true }
-                android.view.MotionEvent.ACTION_UP -> {
-                    val dx=event.x-downX
-                    if(abs(dx)>dp(75)) {
-                        setVideoMode(dx<0)
-                    } else {
-                        try {
-                            val point=cameraPreview.meteringPointFactory.createPoint(event.x,event.y)
-                            cameraControl?.startFocusAndMetering(FocusMeteringAction.Builder(point).build())
-                        } catch (_:Exception) {}
-                    }
-                    true
-                }
-                else -> true
-            }
-        }
-        cameraPage.addView(cameraPreview,LinearLayout.LayoutParams(-1,0,1f))
-        cameraStatus=label("Camera starting…",11f,Color.LTGRAY).apply{gravity=Gravity.CENTER;setPadding(dp(8),dp(3),dp(8),dp(3));setBackgroundColor(Color.BLACK)}
-        cameraPage.addView(cameraStatus,LinearLayout.LayoutParams(-1,dp(22)))
-        val modes=LinearLayout(this).apply{orientation=0;gravity=Gravity.CENTER;setPadding(dp(3),0,dp(3),0);setBackgroundColor(Color.BLACK)}
-        listOf("TIME-LAPSE","VIDEO","PHOTO","PORTRAIT","NIGHT").forEach{mode->
-            val active=(mode=="VIDEO"&&videoMode)||(mode=="PHOTO"&&!videoMode)
-            val b=TextView(this).apply{text=mode;gravity=Gravity.CENTER;textSize=if(active)14f else 11f;setTextColor(if(active)Color.WHITE else Color.LTGRAY);typeface=android.graphics.Typeface.create("sans-serif-medium",0);setPadding(dp(3),dp(10),dp(3),dp(10));setOnClickListener{
-                when(mode){"PHOTO"->setVideoMode(false);"VIDEO"->setVideoMode(true);else->toast("$mode mode is not available yet")}
-                for(i in 0 until modes.childCount){val child=modes.getChildAt(i) as TextView;val selected=child.text==if(videoMode)"VIDEO" else "PHOTO";child.setTextColor(if(selected)Color.WHITE else Color.LTGRAY);child.textSize=if(selected)14f else 11f}
-            }}
-            modes.addView(b,LinearLayout.LayoutParams(0,dp(44),1f))
-        };cameraPage.addView(modes)
+        refreshModeStrip()
         val bottom=LinearLayout(this).apply{orientation=0;gravity=Gravity.CENTER_VERTICAL;setPadding(dp(18),dp(8),dp(18),dp(8));setBackgroundColor(Color.BLACK)}
         bottom.addView(makeButton("▧",false){
             if(videoMode) videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
@@ -275,7 +142,7 @@ class MainActivity : ComponentActivity() {
         bottom.addView(center,LinearLayout.LayoutParams(0,dp(82),1f))
         bottom.addView(makeButton("↻",false){
             if(recording!=null) toast("Stop recording before switching cameras.")
-            else { frontCamera=!frontCamera; startCamera() }
+            else { frontCamera=!frontCamera;startCamera() }
         },LinearLayout.LayoutParams(dp(64),dp(60)))
         cameraPage.addView(bottom)
         root.addView(cameraPage,LinearLayout.LayoutParams(-1,0,1f))
@@ -312,12 +179,10 @@ class MainActivity : ComponentActivity() {
         captureButton.background=rounded(if(recording!=null)Color.RED else Color.WHITE,50)
     }
 
-    private fun modeText(title:String, action:()->Unit)=TextView(this).apply{
+    private fun modeText(title:String,action:()->Unit)=TextView(this).apply{
         text=title;gravity=Gravity.CENTER;textSize=14f
         typeface=android.graphics.Typeface.create("sans-serif-medium",0)
-        setOnClickListener {
-            animate().alpha(0.75f).setDuration(80).withEndAction { alpha=1f; action() }.start()
-        }
+        setOnClickListener{animate().alpha(0.7f).setDuration(80).withEndAction{alpha=1f;action()}.start()}
     }
 
     private fun refreshModeStrip(){
@@ -354,8 +219,8 @@ class MainActivity : ComponentActivity() {
             val tempFile=File(cacheDir,"capture_${System.currentTimeMillis()}.jpg")
             val output=ImageCapture.OutputFileOptions.Builder(tempFile).build()
             ic.takePicture(output,cameraExecutor,object:ImageCapture.OnImageSavedCallback{
-                override fun onImageSaved(result:ImageCapture.OutputFileResults){ processCapturedPhoto(tempFile) }
-                override fun onError(error:ImageCaptureException){ tempFile.delete();runOnUiThread{cameraStatus.text="Photo failed: ${error.message}";toast("Photo capture failed.")} }
+                override fun onImageSaved(result:ImageCapture.OutputFileResults){processCapturedPhoto(tempFile)}
+                override fun onError(error:ImageCaptureException){tempFile.delete();runOnUiThread{cameraStatus.text="Photo failed: ${error.message}";toast("Photo capture failed.")}}
             })
         }
     }
@@ -486,37 +351,36 @@ class MainActivity : ComponentActivity() {
     private fun decodeScaledBitmap(file:File):Bitmap =
         decodeImageSource(ImageDecoder.createSource(file))
 
-    private fun decodeImageSource(source:ImageDecoder.Source):Bitmap {
-        return ImageDecoder.decodeBitmap(source){ decoder, info, _ ->
-            val w=info.size.width
-            val h=info.size.height
-            val scale=minOf(1f,2500f/max(w,h).toFloat())
-            decoder.setTargetSize((w*scale).toInt().coerceAtLeast(1),(h*scale).toInt().coerceAtLeast(1))
+    private fun decodeImageSource(source:ImageDecoder.Source):Bitmap =
+        ImageDecoder.decodeBitmap(source){decoder,info,_->
+            val width=info.size.width
+            val height=info.size.height
+            val scale=minOf(1f,2500f/max(width,height).toFloat())
+            decoder.setTargetSize((width*scale).toInt().coerceAtLeast(1),(height*scale).toInt().coerceAtLeast(1))
             decoder.allocator=ImageDecoder.ALLOCATOR_SOFTWARE
             decoder.isMutableRequired=true
         }
-    }
 
     private fun processCapturedPhoto(file:File){
         runOnUiThread{cameraStatus.text="Photo captured · auto-enhancing…";captureButton.isEnabled=false}
-        thread {
-            var originalBitmap:Bitmap?=null
-            var enhancedBitmap:Bitmap?=null
-            try {
-                originalBitmap=decodeScaledBitmap(file)
-                enhancedBitmap=improveBitmap(originalBitmap,if(hdrEnabled)68 else 48)
-                saveBitmapToGallery(enhancedBitmap,"ClearLens_${stamp()}_enhanced.jpg")
+        thread{
+            var source:Bitmap?=null
+            var enhancedImage:Bitmap?=null
+            try{
+                source=decodeScaledBitmap(file)
+                enhancedImage=improveBitmap(source,if(hdrEnabled)68 else 48)
+                saveBitmapToGallery(enhancedImage,"ClearLens_${stamp()}_enhanced.jpg")
                 runOnUiThread{cameraStatus.text="Photo enhanced · Pictures/ClearLens AI";captureButton.isEnabled=true;toast("Photo enhanced and saved.")}
-            } catch (_:Exception) {
-                try {
+            }catch(_:Exception){
+                try{
                     saveFileToGallery(file,"ClearLens_${stamp()}_original.jpg")
-                    runOnUiThread{cameraStatus.text="Saved original; auto-enhancement failed.";captureButton.isEnabled=true;toast("Original saved. Enhancement could not be applied.")}
-                } catch (_:Exception) {
-                    runOnUiThread{cameraStatus.text="Could not save photo. Please try again.";captureButton.isEnabled=true;toast("Photo processing failed.")}
+                    runOnUiThread{cameraStatus.text="Original saved; enhancement failed.";captureButton.isEnabled=true;toast("Original photo saved, but improvement failed.")}
+                }catch(_:Exception){
+                    runOnUiThread{cameraStatus.text="Photo could not be saved.";captureButton.isEnabled=true;toast("Photo processing failed.")}
                 }
-            } finally {
-                if(enhancedBitmap!=null && enhancedBitmap!==originalBitmap) enhancedBitmap.recycle()
-                originalBitmap?.recycle()
+            }finally{
+                if(enhancedImage!=null && enhancedImage!==source) enhancedImage.recycle()
+                source?.recycle()
                 file.delete()
             }
         }
@@ -531,13 +395,13 @@ class MainActivity : ComponentActivity() {
         }
         val uri=contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,values)?:throw IOException("Could not create image")
         try{
-            contentResolver.openOutputStream(uri)?.use{if(!bitmap.compress(Bitmap.CompressFormat.JPEG,95,it))throw IOException("Could not encode image")}?:throw IOException("Could not open output")
+            contentResolver.openOutputStream(uri)?.use{if(!bitmap.compress(Bitmap.CompressFormat.JPEG,95,it))throw IOException("Could not encode image")}?:throw IOException("Could not open image output")
             contentResolver.update(uri,ContentValues().apply{put(MediaStore.Images.Media.IS_PENDING,0)},null,null)
         }catch(e:Exception){contentResolver.delete(uri,null,null);throw e}
     }
 
     private fun saveFileToGallery(file:File,name:String){
-        if(!file.exists() || file.length()==0L)throw IOException("Empty image")
+        if(!file.exists()||file.length()==0L)throw IOException("Image file is empty")
         val values=ContentValues().apply{
             put(MediaStore.Images.Media.DISPLAY_NAME,name)
             put(MediaStore.Images.Media.MIME_TYPE,"image/jpeg")
@@ -546,7 +410,7 @@ class MainActivity : ComponentActivity() {
         }
         val uri=contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,values)?:throw IOException("Could not create image")
         try{
-            contentResolver.openOutputStream(uri)?.use{out->FileInputStream(file).use{it.copyTo(out)}}?:throw IOException("Could not open output")
+            contentResolver.openOutputStream(uri)?.use{output->FileInputStream(file).use{it.copyTo(output)}}?:throw IOException("Could not write image")
             contentResolver.update(uri,ContentValues().apply{put(MediaStore.Images.Media.IS_PENDING,0)},null,null)
         }catch(e:Exception){contentResolver.delete(uri,null,null);throw e}
     }
