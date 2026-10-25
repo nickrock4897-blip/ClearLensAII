@@ -121,11 +121,13 @@ class MainActivity : ComponentActivity() {
             try{
                 val provider=future.get()
                 val preview=Preview.Builder().build().also{it.setSurfaceProvider(cameraPreview.surfaceProvider)}
-                imageCapture=ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).build()
+                val stillCapture=ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).build()
                 val recorder=Recorder.Builder().setQualitySelector(QualitySelector.from(Quality.HD)).build()
-                videoCapture=VideoCapture.withOutput(recorder)
+                val movieCapture=VideoCapture.withOutput(recorder)
+                imageCapture=stillCapture
+                videoCapture=movieCapture
                 provider.unbindAll()
-                provider.bindToLifecycle(this,CameraSelector.DEFAULT_BACK_CAMERA,preview,imageCapture,videoCapture)
+                provider.bindToLifecycle(this,CameraSelector.DEFAULT_BACK_CAMERA,preview,stillCapture,movieCapture)
                 cameraStatus.text="Ready · back camera"
             }catch(e:Exception){cameraStatus.text="Camera error: ${e.localizedMessage ?: "unknown"}"}
         },ContextCompat.getMainExecutor(this))
