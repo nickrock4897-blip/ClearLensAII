@@ -58,6 +58,9 @@ class MainActivity : ComponentActivity() {
     private var videoCapture:VideoCapture<Recorder>?=null
     private var recording:Recording?=null
     private var videoMode=false
+    private var frontCamera=false
+    private var flashEnabled=false
+    private var hdrEnabled=true
     private var selectedVideo:Uri?=null
     private var original:Bitmap?=null
     private var enhanced:Bitmap?=null
@@ -81,37 +84,40 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun buildUI(){
-        root=LinearLayout(this).apply{orientation=1;setPadding(dp(16),dp(10),dp(16),dp(14));setBackgroundColor(bg)}
-        val header=LinearLayout(this).apply{orientation=0;gravity=Gravity.CENTER_VERTICAL;setPadding(0,dp(4),0,dp(14))}
-        header.addView(label("◈",30f,mint,true),LinearLayout.LayoutParams(dp(46),dp(46)))
-        val names=LinearLayout(this).apply{orientation=1;setPadding(dp(10),0,0,0)}
-        names.addView(label("ClearLens AI",22f,Color.WHITE,true));names.addView(label("CAMERA STUDIO",10f,mint,true))
-        header.addView(names,LinearLayout.LayoutParams(0,-2,1f))
-        header.addView(makeButton("⚙",false){showSettings()},LinearLayout.LayoutParams(dp(52),dp(46)))
-        root.addView(header)
-        cameraPage=LinearLayout(this).apply{orientation=1}
-        val hero=LinearLayout(this).apply{orientation=1;setPadding(dp(16),dp(15),dp(16),dp(15));background=rounded(panel,20)}
-        hero.addView(label("Capture something clearer.",21f,Color.WHITE,true))
-        hero.addView(label("Live camera · photo cleanup · video export",12f,muted).apply{setPadding(0,dp(5),0,0)})
-        cameraPage.addView(hero,margin(-1,-2,0,0,0,10))
+        window.statusBarColor=Color.BLACK;window.navigationBarColor=Color.BLACK
+        root=LinearLayout(this).apply{orientation=1;setBackgroundColor(Color.BLACK);setPadding(0,0,0,dp(4))}
+        val top=LinearLayout(this).apply{orientation=0;gravity=Gravity.CENTER_VERTICAL;setPadding(dp(12),dp(6),dp(12),dp(6));setBackgroundColor(Color.BLACK)}
+        top.addView(makeButton("⚡",false){flashEnabled=!flashEnabled;imageCapture?.flashMode=if(flashEnabled)ImageCapture.FLASH_MODE_ON else ImageCapture.FLASH_MODE_OFF;toast(if(flashEnabled)"Flash on" else "Flash off")},LinearLayout.LayoutParams(dp(48),dp(44)))
+        top.addView(makeButton("◎",false){toast("Tap the preview to focus where supported")},LinearLayout.LayoutParams(dp(48),dp(44)))
+        top.addView(View(this),LinearLayout.LayoutParams(0,1,1f))
+        top.addView(makeButton("HDR",false){hdrEnabled=!hdrEnabled;toast(if(hdrEnabled)"HDR preference on" else "HDR preference off")},LinearLayout.LayoutParams(dp(58),dp(44)))
+        top.addView(makeButton("⚙",false){showSettings()},LinearLayout.LayoutParams(dp(44),dp(44)));root.addView(top)
+        cameraPage=LinearLayout(this).apply{orientation=1;setBackgroundColor(Color.BLACK)}
         cameraPreview=PreviewView(this).apply{scaleType=PreviewView.ScaleType.FILL_CENTER;implementationMode=PreviewView.ImplementationMode.COMPATIBLE;setBackgroundColor(Color.BLACK)}
-        cameraPage.addView(cameraPreview,LinearLayout.LayoutParams(-1,dp(330)))
-        cameraStatus=label("Camera starting…",13f,Color.WHITE).apply{setPadding(dp(12),dp(10),dp(12),dp(10));background=rounded(panel,14)}
-        cameraPage.addView(cameraStatus,margin(-1,-2,0,dp(8),0,dp(4)))
-        val modes=LinearLayout(this).apply{orientation=0}
-        modes.addView(makeButton("PHOTO",true){setVideoMode(false)},LinearLayout.LayoutParams(0,dp(46),1f).apply{setMargins(0,dp(4),dp(5),dp(5))})
-        modes.addView(makeButton("VIDEO",false){setVideoMode(true)},LinearLayout.LayoutParams(0,dp(46),1f).apply{setMargins(dp(5),dp(4),0,dp(5))})
-        cameraPage.addView(modes)
-        captureButton=makeButton("●   TAKE PHOTO",true){captureMedia()}
-        cameraPage.addView(captureButton,margin(-1,dp(54),0,dp(3),0,dp(8)))
-        val imports=LinearLayout(this).apply{orientation=0}
-        imports.addView(makeButton("Import photo",false){imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))},LinearLayout.LayoutParams(0,dp(46),1f).apply{setMargins(0,0,dp(5),0)})
-        imports.addView(makeButton("Import video",false){videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))},LinearLayout.LayoutParams(0,dp(46),1f).apply{setMargins(dp(5),0,0,0)})
-        cameraPage.addView(imports)
+        cameraPage.addView(cameraPreview,LinearLayout.LayoutParams(-1,0,1f))
+        cameraStatus=label("Camera starting…",11f,Color.LTGRAY).apply{gravity=Gravity.CENTER;setPadding(dp(8),dp(3),dp(8),dp(3));setBackgroundColor(Color.BLACK)}
+        cameraPage.addView(cameraStatus,LinearLayout.LayoutParams(-1,dp(22)))
+        val modes=LinearLayout(this).apply{orientation=0;gravity=Gravity.CENTER;setPadding(dp(3),0,dp(3),0);setBackgroundColor(Color.BLACK)}
+        listOf("TIME-LAPSE","VIDEO","PHOTO","PORTRAIT","NIGHT").forEach{mode->
+            val active=(mode=="VIDEO"&&videoMode)||(mode=="PHOTO"&&!videoMode)
+            val b=TextView(this).apply{text=mode;gravity=Gravity.CENTER;textSize=if(active)14f else 11f;setTextColor(if(active)Color.WHITE else Color.LTGRAY);typeface=android.graphics.Typeface.create("sans-serif-medium",0);setPadding(dp(3),dp(10),dp(3),dp(10));setOnClickListener{
+                when(mode){"PHOTO"->setVideoMode(false);"VIDEO"->setVideoMode(true);else->toast("$mode mode is not available yet")}
+                for(i in 0 until modes.childCount){val child=modes.getChildAt(i) as TextView;val selected=child.text==if(videoMode)"VIDEO" else "PHOTO";child.setTextColor(if(selected)Color.WHITE else Color.LTGRAY);child.textSize=if(selected)14f else 11f}
+            }}
+            modes.addView(b,LinearLayout.LayoutParams(0,dp(44),1f))
+        };cameraPage.addView(modes)
+        val bottom=LinearLayout(this).apply{orientation=0;gravity=Gravity.CENTER_VERTICAL;setPadding(dp(18),dp(8),dp(18),dp(8));setBackgroundColor(Color.BLACK)}
+        bottom.addView(makeButton("▧",false){imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))},LinearLayout.LayoutParams(dp(64),dp(60)))
+        val center=FrameLayout(this)
+        val shutter=TextView(this).apply{text="";gravity=Gravity.CENTER;background=rounded(Color.WHITE,50);foreground=android.graphics.drawable.GradientDrawable().apply{shape=android.graphics.drawable.GradientDrawable.OVAL;setColor(Color.TRANSPARENT);setStroke(dp(3),Color.WHITE)};setOnClickListener{captureMedia()}}
+        center.addView(shutter,FrameLayout.LayoutParams(dp(76),dp(76),Gravity.CENTER));bottom.addView(center,LinearLayout.LayoutParams(0,dp(82),1f))
+        bottom.addView(makeButton("↻",false){frontCamera=!frontCamera;startCamera()},LinearLayout.LayoutParams(dp(64),dp(60)));cameraPage.addView(bottom)
+        val utility=LinearLayout(this).apply{orientation=0;setPadding(dp(12),0,dp(12),dp(6));setBackgroundColor(Color.BLACK)}
+        utility.addView(makeButton("Photo Lab · import photo",false){imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))},LinearLayout.LayoutParams(0,dp(42),1f).apply{setMargins(0,0,dp(5),0)})
+        utility.addView(makeButton("Import video",false){videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))},LinearLayout.LayoutParams(0,dp(42),1f).apply{setMargins(dp(5),0,0,0)});cameraPage.addView(utility)
         root.addView(cameraPage,LinearLayout.LayoutParams(-1,0,1f))
-        editorPage=LinearLayout(this).apply{orientation=1;visibility=View.GONE}
-        root.addView(ScrollView(this).apply{addView(editorPage)},LinearLayout.LayoutParams(-1,0,1f))
-        setContentView(root)
+        editorPage=LinearLayout(this).apply{orientation=1;visibility=View.GONE;setPadding(dp(16),dp(6),dp(16),dp(20));setBackgroundColor(bg)}
+        root.addView(ScrollView(this).apply{addView(editorPage)},LinearLayout.LayoutParams(-1,0,1f));setContentView(root)
     }
 
     private fun startCamera(){
@@ -127,7 +133,8 @@ class MainActivity : ComponentActivity() {
                 imageCapture=stillCapture
                 videoCapture=movieCapture
                 provider.unbindAll()
-                provider.bindToLifecycle(this,CameraSelector.DEFAULT_BACK_CAMERA,preview,stillCapture,movieCapture)
+                provider.bindToLifecycle(this,if(frontCamera)CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA,preview,stillCapture,movieCapture)
+                stillCapture.flashMode=if(flashEnabled)ImageCapture.FLASH_MODE_ON else ImageCapture.FLASH_MODE_OFF
                 cameraStatus.text="Ready · back camera"
             }catch(e:Exception){cameraStatus.text="Camera error: ${e.localizedMessage ?: "unknown"}"}
         },ContextCompat.getMainExecutor(this))
