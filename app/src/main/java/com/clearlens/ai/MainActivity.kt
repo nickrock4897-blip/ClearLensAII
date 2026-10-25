@@ -1,6 +1,8 @@
 package com.clearlens.ai
 
+import android.Manifest
 import android.content.ContentValues
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -13,375 +15,172 @@ import android.widget.*
 import androidx.activity.ComponentActivity
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.*
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.*
+import androidx.camera.view.PreviewView
+import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.Brightness
 import androidx.media3.effect.Contrast
-import androidx.media3.transformer.EditedMediaItem
-import androidx.media3.transformer.Effects
-import androidx.media3.transformer.ExportException
-import androidx.media3.transformer.ExportResult
-import androidx.media3.transformer.Transformer
+import androidx.media3.transformer.*
 import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 import kotlin.math.max
 
 class MainActivity : ComponentActivity() {
-    private lateinit var status: TextView
-    private lateinit var progress: ProgressBar
-    private lateinit var originalPreview: ImageView
-    private lateinit var enhancedPreview: ImageView
-    private lateinit var strengthLabel: TextView
-    private lateinit var saveImageButton: Button
-    private lateinit var enhanceVideoButton: Button
-    private lateinit var enhanceImageButton: Button
-    private var selectedVideoUri: Uri? = null
-    private var originalBitmap: Bitmap? = null
-    private var enhancedBitmap: Bitmap? = null
-    private var intensity = 45
+    private val bg=Color.rgb(12,16,27); private val card=Color.rgb(24,31,47); private val accent=Color.rgb(114,240,205); private val muted=Color.rgb(168,181,200)
+    private lateinit var root:LinearLayout; private lateinit var cameraPage:LinearLayout; private lateinit var preview:PreviewView
+    private lateinit var cameraStatus:TextView; private lateinit var capture:Button; private lateinit var editor:LinearLayout
+    private lateinit var originalView:ImageView; private lateinit var resultView:ImageView; private lateinit var editStatus:TextView
+    private lateinit var progress:ProgressBar; private lateinit var enhance:Button; private lateinit var save:Button; private lateinit var strengthText:TextView
+    private var imageCapture:ImageCapture?=null; private var videoCapture:VideoCapture<Recorder>?=null; private var recording:Recording?=null
+    private var videoMode=false; private var selectedVideo:Uri?=null; private var original:Bitmap?=null; private var enhanced:Bitmap?=null; private var strength=45
+    private val executor:ExecutorService=Executors.newSingleThreadExecutor()
 
-    private val imagePicker = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) {
-            selectedVideoUri = null
-            enhancedBitmap = null
-            saveImageButton.isEnabled = false
-            enhanceVideoButton.isEnabled = false
-            enhanceImageButton.isEnabled = false
-            status.text = "Bild wird geladen …"
-            progress.visibility = View.VISIBLE
-            thread {
-                try {
-                    val bitmap = decodeScaledBitmap(uri)
-                    runOnUiThread {
-                        originalBitmap = bitmap
-                        originalPreview.setImageBitmap(bitmap)
-                        enhancedPreview.setImageDrawable(null)
-                        status.text = "Bild bereit. Tippe auf „Bild verbessern“."
-                        progress.visibility = View.GONE
-                        enhanceImageButton.isEnabled = true
-                    }
-                } catch (_: Exception) {
-                    runOnUiThread {
-                        progress.visibility = View.GONE
-                        status.text = "Das Bild konnte nicht geöffnet werden."
-                        toast("Bild konnte nicht geladen werden.")
-                    }
-                }
-            }
-        }
+    private val permissions=registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()){ if(it[Manifest.permission.CAMERA]==true) startCamera() else cameraStatus.text="Allow camera access in Android settings to take photos." }
+    private val imagePicker=registerForActivityResult(ActivityResultContracts.PickVisualMedia()){ if(it!=null) loadImage(it) }
+    private val videoPicker=registerForActivityResult(ActivityResultContracts.PickVisualMedia()){ uri-> if(uri!=null){selectedVideo=uri;original=null;enhanced=null;showEditor();editStatus.text="Video selected. Export an enhanced MP4."; editorControls(true)} }
+
+    override fun onCreate(savedInstanceState:Bundle?){super.onCreate(savedInstanceState);window.statusBarColor=bg;window.navigationBarColor=bg;buildUI();if(hasCamera())startCamera() else permissions.launch(arrayOf(Manifest.permission.CAMERA,Manifest.permission.RECORD_AUDIO))}
+    private fun buildUI(){
+        root=LinearLayout(this).apply{orientation=1;setPadding(dp(16),dp(10),dp(16),dp(14));setBackgroundColor(bg)}
+        val header=LinearLayout(this).apply{orientation=0;gravity=Gravity.CENTER_VERTICAL;setPadding(0,dp(4),0,dp(14))}
+        header.addView(label("◈",30f,accent,true),LinearLayout.LayoutParams(dp(45),dp(45)))
+        val names=LinearLayout(this).apply{orientation=1;setPadding(dp(10),0,0,0)}
+        names.addView(label("ClearLens AI",22f,Color.WHITE,true));names.addView(label("CAMERA STUDIO",10f,accent,true))
+        header.addView(names,LinearLayout.LayoutParams(0,-2,1f));header.addView(button("⚙",false){settings()},LinearLayout.LayoutParams(dp(52),dp(46));root.addView(header)
+        cameraPage=LinearLayout(this).apply{orientation=1}
+        val hero=LinearLayout(this).apply{orientation=1;setPadding(dp(16),dp(15),dp(16),dp(15));background=rounded(card,20)}
+        hero.addView(label("Capture something clearer.",21f,Color.WHITE,true));hero.addView(label("Live camera · photo cleanup · video export",12f,muted).apply{setPadding(0,dp(5),0,0)})
+        cameraPage.addView(hero,margin(-1,-2,0,0,0,10))
+        preview=PreviewView(this).apply{scaleType=PreviewView.ScaleType.FILL_CENTER;implementationMode=PreviewView.ImplementationMode.COMPATIBLE;setBackgroundColor(Color.BLACK)}
+        cameraPage.addView(preview,LinearLayout.LayoutParams(-1,dp(330)))
+        cameraStatus=label("Camera starting…",13f,Color.WHITE).apply{setPadding(dp(12),dp(10),dp(12),dp(10));background=rounded(card,14)}
+        cameraPage.addView(cameraStatus,margin(-1,-2,0,dp(8),0,dp(4)))
+        val modes=LinearLayout(this).apply{orientation=0}
+        modes.addView(button("PHOTO",true){setMode(false)},LinearLayout.LayoutParams(0,dp(46),1f).apply{setMargins(0,dp(4),dp(5),dp(5))})
+        modes.addView(button("VIDEO",false){setMode(true)},LinearLayout.LayoutParams(0,dp(46),1f).apply{setMargins(dp(5),dp(4),0,dp(5))})
+        cameraPage.addView(modes);capture=button("●   TAKE PHOTO",true){captureMedia()};cameraPage.addView(capture,margin(-1,dp(54),0,dp(3),0,dp(8)))
+        val imports=LinearLayout(this).apply{orientation=0}
+        imports.addView(button("Import photo",false){imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))},LinearLayout.LayoutParams(0,dp(46),1f).apply{setMargins(0,0,dp(5),0)})
+        imports.addView(button("Import video",false){videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))},LinearLayout.LayoutParams(0,dp(46),1f).apply{setMargins(dp(5),0,0,0)})
+        cameraPage.addView(imports);root.addView(cameraPage,LinearLayout.LayoutParams(-1,0,1f))
+        editor=LinearLayout(this).apply{orientation=1;visibility=View.GONE};val scroll=ScrollView(this).apply{addView(editor)}
+        root.addView(scroll,LinearLayout.LayoutParams(-1,0,1f));setContentView(root)
     }
-
-    private val videoPicker = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) {
-            selectedVideoUri = uri
-            originalBitmap = null
-            enhancedBitmap = null
-            originalPreview.setImageDrawable(null)
-            enhancedPreview.setImageDrawable(null)
-            saveImageButton.isEnabled = false
-            enhanceImageButton.isEnabled = false
-            enhanceVideoButton.isEnabled = true
-            status.text = "Video ausgewählt. Du kannst es jetzt als verbessertes MP4 exportieren."
-        }
+    private fun startCamera(){
+        if(!hasCamera())return
+        val future=ProcessCameraProvider.getInstance(this)
+        future.addListener({try{
+            val provider=future.get();val p=Preview.Builder().build().also{it.setSurfaceProvider(preview.surfaceProvider)}
+            imageCapture=ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).build()
+            val recorder=Recorder.Builder().setQualitySelector(QualitySelector.from(Quality.HD)).build();videoCapture=VideoCapture.withOutput(recorder)
+            provider.unbindAll();provider.bindToLifecycle(this,CameraSelector.DEFAULT_BACK_CAMERA,p,imageCapture,videoCapture);cameraStatus.text="Ready · back camera"
+        }catch(e:Exception){cameraStatus.text="Camera error: ${e.localizedMessage}"}},ContextCompat.getMainExecutor(this))
     }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        buildInterface()
-    }
-
-    private fun buildInterface() {
-        val page = ScrollView(this).apply {
-            setBackgroundColor(Color.rgb(10, 17, 32))
-            isFillViewport = true
-        }
-        val column = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(22), dp(20), dp(28))
-        }
-        page.addView(column)
-        column.addView(textView("ClearLens AI", 30f, Color.rgb(105, 220, 190), true))
-        column.addView(textView("Klarere Bilder und Videos – direkt auf deinem Handy.", 15f, Color.LTGRAY).apply {
-            setPadding(0, dp(6), 0, dp(18))
-        })
-        column.addView(makeButton("Foto auswählen", true) {
-            imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-        })
-        column.addView(makeButton("Video auswählen", false) {
-            videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
-        })
-        strengthLabel = textView("Verbesserungsstärke: 45 %", 14f, Color.WHITE).apply {
-            setPadding(0, dp(14), 0, dp(3))
-        }
-        column.addView(strengthLabel)
-        column.addView(SeekBar(this).apply {
-            max = 100
-            progress = intensity
-            progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(105, 220, 190))
-            thumbTintList = android.content.res.ColorStateList.valueOf(Color.rgb(105, 220, 190))
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) {
-                    intensity = value
-                    strengthLabel.text = "Verbesserungsstärke: " + value + " %"
-                }
-                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+    private fun setMode(video:Boolean){videoMode=video;capture.text=if(video)"●   START RECORDING" else "●   TAKE PHOTO";cameraStatus.text=if(video)"Video mode · recordings save to Movies/ClearLens AI" else "Photo mode · photos save to Pictures/ClearLens AI"}
+    private fun captureMedia(){
+        if(!hasCamera()){permissions.launch(arrayOf(Manifest.permission.CAMERA,Manifest.permission.RECORD_AUDIO));return}
+        if(videoMode){
+            if(recording!=null){recording?.stop();recording=null;capture.text="●   START RECORDING";cameraStatus.text="Saving video…";return}
+            val vc=videoCapture?:return toast("Camera is still starting.")
+            val values=ContentValues().apply{put(MediaStore.Video.Media.DISPLAY_NAME,"ClearLens_${stamp()}.mp4");put(MediaStore.Video.Media.MIME_TYPE,"video/mp4");put(MediaStore.Video.Media.RELATIVE_PATH,"Movies/ClearLens AI")}
+            val opts=MediaStoreOutputOptions.Builder(contentResolver,MediaStore.Video.Media.EXTERNAL_CONTENT_URI).setContentValues(values).build()
+            var pending=vc.output.prepareRecording(this,opts)
+            if(ContextCompat.checkSelfPermission(this,Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED)pending=pending.withAudioEnabled()
+            recording=pending.start(ContextCompat.getMainExecutor(this)){event->when(event){
+                is VideoRecordEvent.Start->{capture.text="■   STOP RECORDING";cameraStatus.text="Recording…"}
+                is VideoRecordEvent.Finalize->{recording=null;capture.text="●   START RECORDING";cameraStatus.text=if(!event.hasError())"Video saved · Movies/ClearLens AI" else "Video save failed: ${event.error}"}
+            }}
+        }else{
+            val ic=imageCapture?:return toast("Camera is still starting.")
+            val values=ContentValues().apply{put(MediaStore.Images.Media.DISPLAY_NAME,"ClearLens_${stamp()}.jpg");put(MediaStore.Images.Media.MIME_TYPE,"image/jpeg");put(MediaStore.Images.Media.RELATIVE_PATH,"Pictures/ClearLens AI")}
+            val output=ImageCapture.OutputFileOptions.Builder(contentResolver,MediaStore.Images.Media.EXTERNAL_CONTENT_URI,values).build()
+            ic.takePicture(output,executor,object:ImageCapture.OnImageSavedCallback{
+                override fun onImageSaved(result:ImageCapture.OutputFileResults){runOnUiThread{cameraStatus.text="Photo saved · Pictures/ClearLens AI";toast("Photo captured.")}}
+                override fun onError(e:ImageCaptureException){runOnUiThread{cameraStatus.text="Photo failed: ${e.message}";toast("Photo capture failed.")}}
             })
-        })
-
-        val previewRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-        originalPreview = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            contentDescription = "Originalbild"
-            setBackgroundColor(Color.rgb(23, 32, 49))
-        }
-        enhancedPreview = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            contentDescription = "Verbessertes Bild"
-            setBackgroundColor(Color.rgb(23, 32, 49))
-        }
-        val originalBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        originalBox.addView(textView("ORIGINAL", 12f, Color.LTGRAY))
-        originalBox.addView(originalPreview, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(210)).apply {
-            setMargins(dp(3), dp(8), dp(3), dp(4))
-        })
-        val enhancedBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        enhancedBox.addView(textView("VERBESSERT", 12f, Color.rgb(105, 220, 190)))
-        enhancedBox.addView(enhancedPreview, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(210)).apply {
-            setMargins(dp(3), dp(8), dp(3), dp(4))
-        })
-        previewRow.addView(originalBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        previewRow.addView(enhancedBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        column.addView(previewRow)
-
-        enhanceImageButton = makeButton("Bild verbessern", true) { enhanceImage() }
-        enhanceImageButton.isEnabled = false
-        column.addView(enhanceImageButton)
-        saveImageButton = makeButton("Verbessertes Bild speichern", false) { saveEnhancedImage() }
-        saveImageButton.isEnabled = false
-        column.addView(saveImageButton)
-        enhanceVideoButton = makeButton("Video verbessern & MP4 speichern", true) { enhanceVideo() }
-        enhanceVideoButton.isEnabled = false
-        column.addView(enhanceVideoButton)
-        progress = ProgressBar(this).apply { visibility = View.GONE }
-        column.addView(progress)
-        status = textView("Wähle ein Foto oder Video aus, um zu starten.", 14f, Color.WHITE).apply {
-            setPadding(0, dp(12), 0, dp(8))
-        }
-        column.addView(status)
-        column.addView(textView(
-            "Hinweis: ClearLens verbessert Kontrast und Farben. Verdeckte Details lassen sich nicht sicher wiederherstellen; echte Feuchtigkeit in der Kameralinse kann die App nicht reparieren.",
-            12f, Color.LTGRAY
-        ).apply { setPadding(0, dp(12), 0, 0) })
-        setContentView(page)
-    }
-
-    private fun textView(value: String, size: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
-        text = value
-        textSize = size
-        setTextColor(color)
-        if (bold) typeface = android.graphics.Typeface.DEFAULT_BOLD
-    }
-
-    private fun makeButton(label: String, primary: Boolean, action: () -> Unit): Button {
-        return Button(this).apply {
-            text = label
-            isAllCaps = false
-            setTextColor(if (primary) Color.rgb(8, 22, 32) else Color.WHITE)
-            backgroundTintList = android.content.res.ColorStateList.valueOf(
-                if (primary) Color.rgb(105, 220, 190) else Color.rgb(38, 51, 72)
-            )
-            setOnClickListener { action() }
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(0, dp(5), 0, dp(5)) }
         }
     }
-
-    private fun enhanceImage() {
-        val source = originalBitmap ?: return toast("Wähle zuerst ein Bild aus.")
-        progress.visibility = View.VISIBLE
-        enhanceImageButton.isEnabled = false
-        saveImageButton.isEnabled = false
-        status.text = "Bild wird verbessert …"
-        val amount = intensity
-        thread {
-            try {
-                val result = improveBitmap(source, amount)
-                runOnUiThread {
-                    enhancedBitmap = result
-                    enhancedPreview.setImageBitmap(result)
-                    progress.visibility = View.GONE
-                    status.text = "Fertig. Vergleiche Original und Ergebnis."
-                    enhanceImageButton.isEnabled = true
-                    saveImageButton.isEnabled = true
-                }
-            } catch (_: Exception) {
-                runOnUiThread {
-                    progress.visibility = View.GONE
-                    enhanceImageButton.isEnabled = true
-                    status.text = "Die Bildverbesserung ist fehlgeschlagen."
-                    toast("Bild konnte nicht verbessert werden.")
-                }
-            }
-        }
+    private fun loadImage(uri:Uri){selectedVideo=null;enhanced=null;showEditor();editStatus.text="Loading photo…";progress.visibility=View.VISIBLE;thread{try{val bmp=decode(uri);runOnUiThread{original=bmp;originalView.setImageBitmap(bmp);resultView.setImageDrawable(null);progress.visibility=View.GONE;editStatus.text="Ready to enhance";editorControls(false)}}catch(_:Exception){runOnUiThread{progress.visibility=View.GONE;editStatus.text="Could not open photo.";toast("Could not open photo.")}}}}
+    private fun showEditor(){
+        cameraPage.visibility=View.GONE;editor.visibility=View.VISIBLE;editor.removeAllViews();editor.setPadding(0,dp(6),0,dp(20))
+        editor.addView(label("PHOTO LAB",10f,accent,true).apply{setPadding(0,dp(8),0,dp(8))})
+        editor.addView(label("Make details feel clearer.",24f,Color.WHITE,true))
+        editor.addView(label("Natural contrast and color controls.",13f,muted).apply{setPadding(0,dp(5),0,dp(12))})
+        val row=LinearLayout(this).apply{orientation=0}
+        originalView=ImageView(this).apply{scaleType=ImageView.ScaleType.CENTER_CROP;setBackgroundColor(card);contentDescription="Original photo"}
+        resultView=ImageView(this).apply{scaleType=ImageView.ScaleType.CENTER_CROP;setBackgroundColor(card);contentDescription="Enhanced photo"}
+        row.addView(previewCard("ORIGINAL",originalView),LinearLayout.LayoutParams(0,dp(220),1f).apply{setMargins(0,0,dp(5),0)})
+        row.addView(previewCard("ENHANCED",resultView),LinearLayout.LayoutParams(0,dp(220),1f).apply{setMargins(dp(5),0,0,0)})
+        editor.addView(row);progress=ProgressBar(this).apply{visibility=View.GONE;indeterminateTintList=android.content.res.ColorStateList.valueOf(accent)};editor.addView(progress)
+        editStatus=label("Choose a photo to begin.",13f,Color.WHITE).apply{setPadding(dp(12),dp(12),dp(12),dp(12));background=rounded(card,14)}
+        editor.addView(editStatus,margin(-1,-2,0,dp(10),0,dp(10)))
+        editor.addView(button("← Back to camera",false){editor.visibility=View.GONE;cameraPage.visibility=View.VISIBLE})
     }
-
-    private fun improveBitmap(source: Bitmap, strength: Int): Bitmap {
-        val result = source.copy(Bitmap.Config.ARGB_8888, true)
-        val width = result.width
-        val height = result.height
-        val pixels = IntArray(width * height)
-        result.getPixels(pixels, 0, width, 0, 0, width, height)
-        val amount = strength.coerceIn(0, 100) / 100f
-        val contrast = 1f + amount * 0.48f
-        val saturation = 1f + amount * 0.28f
-        val brightness = amount * 4f
-        for (i in pixels.indices) {
-            val color = pixels[i]
-            val r = Color.red(color).toFloat()
-            val g = Color.green(color).toFloat()
-            val b = Color.blue(color).toFloat()
-            val lum = 0.299f * r + 0.587f * g + 0.114f * b
-            val sr = lum + (r - lum) * saturation
-            val sg = lum + (g - lum) * saturation
-            val sb = lum + (b - lum) * saturation
-            val nr = ((sr - 127.5f) * contrast + 127.5f + brightness).toInt().coerceIn(0, 255)
-            val ng = ((sg - 127.5f) * contrast + 127.5f + brightness).toInt().coerceIn(0, 255)
-            val nb = ((sb - 127.5f) * contrast + 127.5f + brightness).toInt().coerceIn(0, 255)
-            pixels[i] = Color.argb(Color.alpha(color), nr, ng, nb)
-        }
-        result.setPixels(pixels, 0, width, 0, 0, width, height)
-        return result
+    private fun editorControls(isVideo:Boolean){
+        if((0 until editor.childCount).any{(editor.getChildAt(it) as? Button)?.text?.toString()?.contains("Enhance photo")==true || (editor.getChildAt(it) as? Button)?.text?.toString()?.contains("Video improve")==true})return
+        strengthText=label("Enhancement strength · $strength%",13f,Color.WHITE).apply{setPadding(0,dp(12),0,dp(2))};editor.addView(strengthText)
+        editor.addView(SeekBar(this).apply{max=100;progress=strength;progressTintList=android.content.res.ColorStateList.valueOf(accent);thumbTintList=android.content.res.ColorStateList.valueOf(accent)
+            setOnSeekBarChangeListener(object:SeekBar.OnSeekBarChangeListener{override fun onProgressChanged(s:SeekBar?,v:Int,from:Boolean){strength=v;strengthText.text="Enhancement strength · $v%"};override fun onStartTrackingTouch(s:SeekBar?){};override fun onStopTrackingTouch(s:SeekBar?){}})})
+        if(isVideo){editor.addView(button("Video improve & save MP4",true){enhanceVideo()})}
+        else{enhance=button("✦  Enhance photo",true){enhanceImage()};editor.addView(enhance);save=button("Save enhanced photo",false){saveImage()}.apply{isEnabled=false};editor.addView(save)}
+        editor.addView(label("Note: filters can improve contrast, but cannot recreate missing detail or repair moisture inside a physical camera lens.",11f,muted).apply{setPadding(0,dp(14),0,0)})
     }
-
-    private fun decodeScaledBitmap(uri: Uri): Bitmap {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-            ?: throw IOException("Could not open image")
-        var sample = 1
-        while (max(bounds.outWidth, bounds.outHeight) / sample > 3000) sample *= 2
-        val options = BitmapFactory.Options().apply {
-            inSampleSize = sample
-            inPreferredConfig = Bitmap.Config.ARGB_8888
-        }
-        return contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
-            ?: throw IOException("Could not decode image")
+    private fun previewCard(title:String,img:ImageView):LinearLayout{val box=LinearLayout(this).apply{orientation=1;setPadding(dp(8),dp(8),dp(8),dp(8));background=rounded(card,18)};box.addView(label(title,10f,if(title=="ENHANCED")accent else muted,true).apply{setPadding(0,0,0,dp(7))});box.addView(img,LinearLayout.LayoutParams(-1,0,1f));return box}
+    private fun enhanceImage(){
+        val src=original?:return toast("Choose a photo first.");progress.visibility=View.VISIBLE;enhance.isEnabled=false;save.isEnabled=false;editStatus.text="Enhancing photo…";val amount=strength
+        thread{try{val bmp=improve(src,amount);runOnUiThread{enhanced=bmp;resultView.setImageBitmap(bmp);progress.visibility=View.GONE;enhance.isEnabled=true;save.isEnabled=true;editStatus.text="Done · compare original and enhanced"}}catch(_:Exception){runOnUiThread{progress.visibility=View.GONE;enhance.isEnabled=true;editStatus.text="Enhancement failed. Try a smaller photo."}}}
     }
-
-    private fun saveEnhancedImage() {
-        val bitmap = enhancedBitmap ?: return toast("Verbessere zuerst ein Bild.")
-        try {
-            val values = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, "ClearLens_" + System.currentTimeMillis() + ".jpg")
-                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/ClearLens AI")
-                put(MediaStore.Images.Media.IS_PENDING, 1)
-            }
-            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                ?: throw IOException("Could not create media entry")
-            contentResolver.openOutputStream(uri)?.use {
-                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 94, it)) throw IOException("JPEG failed")
-            } ?: throw IOException("Could not open output")
-            val done = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
-            contentResolver.update(uri, done, null, null)
-            status.text = "Bild gespeichert unter Bilder/ClearLens AI."
-            toast("Bild gespeichert.")
-        } catch (_: Exception) {
-            status.text = "Bild konnte nicht gespeichert werden."
-            toast("Speichern fehlgeschlagen.")
-        }
+    private fun improve(src:Bitmap,value:Int):Bitmap{
+        val out=src.copy(Bitmap.Config.ARGB_8888,true);val w=out.width;val h=out.height;val px=IntArray(w*h);out.getPixels(px,0,w,0,0,w,h)
+        val a=value.coerceIn(0,100)/100f;val contrast=1f+a*.48f;val sat=1f+a*.28f
+        for(i in px.indices){val c=px[i];val r=Color.red(c).toFloat();val g=Color.green(c).toFloat();val b=Color.blue(c).toFloat();val lum=.299f*r+.587f*g+.114f*b
+            val nr=((lum+(r-lum)*sat-127.5f)*contrast+127.5f+a*4).toInt().coerceIn(0,255)
+            val ng=((lum+(g-lum)*sat-127.5f)*contrast+127.5f+a*4).toInt().coerceIn(0,255)
+            val nb=((lum+(b-lum)*sat-127.5f)*contrast+127.5f+a*4).toInt().coerceIn(0,255);px[i]=Color.argb(Color.alpha(c),nr,ng,nb)}
+        out.setPixels(px,0,w,0,0,w,h);return out
     }
-
-    @OptIn(UnstableApi::class)
-    private fun enhanceVideo() {
-        val uri = selectedVideoUri ?: return toast("Wähle zuerst ein Video aus.")
-        val outputFile = File(cacheDir, "clearlens_" + System.currentTimeMillis() + ".mp4")
-        progress.visibility = View.VISIBLE
-        enhanceVideoButton.isEnabled = false
-        status.text = "Video wird verarbeitet. Das kann eine Weile dauern …"
-        try {
-            val effects = Effects(
-                emptyList(),
-                listOf(Contrast((intensity / 100f) * 0.30f), Brightness((intensity / 100f) * 0.05f))
-            )
-            val edited = EditedMediaItem.Builder(MediaItem.fromUri(uri)).setEffects(effects).build()
-            val transformer = Transformer.Builder(this)
-                .setVideoMimeType(MimeTypes.VIDEO_H264)
-                .addListener(object : Transformer.Listener {
-                    override fun onCompleted(
-                        composition: androidx.media3.transformer.Composition,
-                        exportResult: ExportResult
-                    ) {
-                        thread {
-                            try {
-                                copyVideoToGallery(outputFile)
-                                runOnUiThread {
-                                    progress.visibility = View.GONE
-                                    enhanceVideoButton.isEnabled = true
-                                    status.text = "Video als MP4 unter Filme/ClearLens AI gespeichert."
-                                    toast("Verbessertes MP4 gespeichert.")
-                                    outputFile.delete()
-                                }
-                            } catch (_: Exception) {
-                                runOnUiThread {
-                                    progress.visibility = View.GONE
-                                    enhanceVideoButton.isEnabled = true
-                                    status.text = "Video exportiert, aber Speichern in der Galerie ist fehlgeschlagen."
-                                    toast("Speichern des Videos fehlgeschlagen.")
-                                }
-                            }
-                        }
-                    }
-
-                    override fun onError(
-                        composition: androidx.media3.transformer.Composition,
-                        exportResult: ExportResult,
-                        exportException: ExportException
-                    ) {
-                        runOnUiThread {
-                            progress.visibility = View.GONE
-                            enhanceVideoButton.isEnabled = true
-                            status.text = "Videoexport fehlgeschlagen: " + exportException.errorCodeName
-                            outputFile.delete()
-                            toast("Video konnte nicht exportiert werden.")
-                        }
-                    }
-                }).build()
-            transformer.start(edited, outputFile.absolutePath)
-        } catch (e: Exception) {
-            progress.visibility = View.GONE
-            enhanceVideoButton.isEnabled = true
-            status.text = "Videoexport konnte nicht starten: " + (e.message ?: "unbekannter Fehler")
-            outputFile.delete()
-            toast("Videoexport konnte nicht gestartet werden.")
-        }
+    private fun saveImage(){val bmp=enhanced?:return toast("Enhance a photo first.");try{val values=ContentValues().apply{put(MediaStore.Images.Media.DISPLAY_NAME,"ClearLens_${stamp()}_enhanced.jpg");put(MediaStore.Images.Media.MIME_TYPE,"image/jpeg");put(MediaStore.Images.Media.RELATIVE_PATH,"Pictures/ClearLens AI");put(MediaStore.Images.Media.IS_PENDING,1)}
+        val uri=contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,values)?:throw IOException("insert failed")
+        contentResolver.openOutputStream(uri)?.use{if(!bmp.compress(Bitmap.CompressFormat.JPEG,95,it))throw IOException("compress failed")}?:throw IOException("output failed")
+        contentResolver.update(uri,ContentValues().apply{put(MediaStore.Images.Media.IS_PENDING,0)},null,null);editStatus.text="Saved · Pictures/ClearLens AI";toast("Enhanced photo saved.")
+    }catch(_:Exception){editStatus.text="Could not save photo.";toast("Save failed.")}}
+    @OptIn(UnstableApi::class) private fun enhanceVideo(){
+        val uri=selectedVideo?:return toast("Choose a video first.");val file=File(cacheDir,"clearlens_${System.currentTimeMillis()}.mp4");progress.visibility=View.VISIBLE;editStatus.text="Processing video… keep app open."
+        val effects=Effects(emptyList(),listOf(Contrast(strength/100f*.30f),Brightness(strength/100f*.05f)))
+        val item=EditedMediaItem.Builder(MediaItem.fromUri(uri)).setEffects(effects).build()
+        Transformer.Builder(this).setVideoMimeType(MimeTypes.VIDEO_H264).addListener(object:Transformer.Listener{
+            override fun onCompleted(composition:Composition,result:ExportResult){thread{try{saveVideo(file);runOnUiThread{progress.visibility=View.GONE;editStatus.text="MP4 saved · Movies/ClearLens AI";toast("Enhanced MP4 saved.");file.delete()}}catch(_:Exception){runOnUiThread{progress.visibility=View.GONE;editStatus.text="Processed but could not save MP4."}}}
+            override fun onError(composition:Composition,result:ExportResult,error:ExportException){runOnUiThread{progress.visibility=View.GONE;editStatus.text="Video export failed: ${error.errorCodeName}";file.delete()}}
+        }).build().start(item,file.absolutePath)
     }
-
-    private fun copyVideoToGallery(file: File): Uri {
-        if (!file.exists() || file.length() == 0L) throw IOException("Empty video output")
-        val values = ContentValues().apply {
-            put(MediaStore.Video.Media.DISPLAY_NAME, "ClearLens_" + System.currentTimeMillis() + ".mp4")
-            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/ClearLens AI")
-            put(MediaStore.Video.Media.IS_PENDING, 1)
-        }
-        val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
-            ?: throw IOException("Could not create video entry")
-        contentResolver.openOutputStream(uri)?.use { output ->
-            FileInputStream(file).use { input -> input.copyTo(output) }
-        } ?: throw IOException("Could not open video output")
-        val done = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
-        contentResolver.update(uri, done, null, null)
-        return uri
+    private fun saveVideo(file:File){if(!file.exists()||file.length()==0L)throw IOException("empty video")
+        val values=ContentValues().apply{put(MediaStore.Video.Media.DISPLAY_NAME,"ClearLens_${stamp()}_enhanced.mp4");put(MediaStore.Video.Media.MIME_TYPE,"video/mp4");put(MediaStore.Video.Media.RELATIVE_PATH,"Movies/ClearLens AI");put(MediaStore.Video.Media.IS_PENDING,1)}
+        val uri=contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI,values)?:throw IOException("insert failed")
+        contentResolver.openOutputStream(uri)?.use{o->FileInputStream(file).use{it.copyTo(o)}}?:throw IOException("output failed")
+        contentResolver.update(uri,ContentValues().apply{put(MediaStore.Video.Media.IS_PENDING,0)},null,null)
     }
-
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-    private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    private fun settings(){val options=arrayOf("Premium dark theme is active","Photo Lab · adjust enhancement strength","Photos: Pictures/ClearLens AI","Videos: Movies/ClearLens AI","About & limitations")
+        android.app.AlertDialog.Builder(this).setTitle("ClearLens settings").setItems(options){_,which->if(which==4)android.app.AlertDialog.Builder(this).setTitle("About ClearLens AI").setMessage("Local image filters improve contrast and color. They cannot restore absent detail or repair physical lens moisture.").setPositiveButton("OK",null).show()}.setNegativeButton("Close",null).show()}
+    private fun decode(uri:Uri):Bitmap{val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true};contentResolver.openInputStream(uri)?.use{BitmapFactory.decodeStream(it,null,bounds)}?:throw IOException("open failed");var sample=1;while(max(bounds.outWidth,bounds.outHeight)/sample>2500)sample*=2
+        return contentResolver.openInputStream(uri)?.use{BitmapFactory.decodeStream(it,null,BitmapFactory.Options().apply{inSampleSize=sample;inPreferredConfig=Bitmap.Config.ARGB_8888})}?:throw IOException("decode failed")}
+    private fun label(text:String,size:Float,color:Int,bold:Boolean=false)=TextView(this).apply{this.text=text;textSize=size;setTextColor(color);if(bold)typeface=android.graphics.Typeface.create("sans-serif-medium",0)}
+    private fun button(text:String,primary:Boolean,action:()->Unit)=Button(this).apply{this.text=text;isAllCaps=false;textSize=13f;typeface=android.graphics.Typeface.create("sans-serif-medium",0);setTextColor(if(primary)bg else Color.WHITE);background=rounded(if(primary)accent else card,15);stateListAnimator=null;setPadding(dp(8),dp(4),dp(8),dp(4));setOnClickListener{action()}}
+    private fun rounded(color:Int,radius:Int)=android.graphics.drawable.GradientDrawable().apply{setColor(color);cornerRadius=dp(radius).toFloat()}
+    private fun margin(w:Int,h:Int,l:Int,t:Int,r:Int,b:Int)=LinearLayout.LayoutParams(w,h).apply{setMargins(l,t,r,b)}
+    private fun hasCamera()=ContextCompat.checkSelfPermission(this,Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED
+    private fun dp(v:Int)=(v*resources.displayMetrics.density).toInt()
+    private fun stamp()=SimpleDateFormat("yyyyMMdd_HHmmss",Locale.US).format(System.currentTimeMillis())
+    private fun toast(s:String)=Toast.makeText(this,s,Toast.LENGTH_LONG).show()
+    override fun onDestroy(){recording?.stop();executor.shutdown();super.onDestroy()}
 }
