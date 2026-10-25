@@ -299,8 +299,8 @@ class MainActivity : ComponentActivity() {
         var sample=1;while(max(bounds.outWidth,bounds.outHeight)/sample>2500)sample*=2
         return contentResolver.openInputStream(uri)?.use{BitmapFactory.decodeStream(it,null,BitmapFactory.Options().apply{inSampleSize=sample;inPreferredConfig=Bitmap.Config.ARGB_8888})}?:throw IOException("decode failed")
     }
-    private fun label(text:String,size:Float,color:Int,bold:Boolean=false)=TextView(this).apply{text=text; textSize=size;setTextColor(color);if(bold)typeface=android.graphics.Typeface.create("sans-serif-medium",0)}
-    private fun makeButton(text:String,primary:Boolean,action:()->Unit)=Button(this).apply{text=text;isAllCaps=false;textSize=13f;typeface=android.graphics.Typeface.create("sans-serif-medium",0);setTextColor(if(primary)bg else Color.WHITE);background=rounded(if(primary)mint else panel,15);stateListAnimator=null;setPadding(dp(8),dp(4),dp(8),dp(4));setOnClickListener{action()}}
+    private fun label(text:String,size:Float,color:Int,bold:Boolean=false)=TextView(this).apply{this.text=text; this.textSize=size;setTextColor(color);if(bold)typeface=android.graphics.Typeface.create("sans-serif-medium",0)}
+    private fun makeButton(text:String,primary:Boolean,action:()->Unit)=Button(this).apply{this.text=text;isAllCaps=false;textSize=13f;typeface=android.graphics.Typeface.create("sans-serif-medium",0);setTextColor(if(primary)bg else Color.WHITE);background=rounded(if(primary)mint else panel,15);stateListAnimator=null;setPadding(dp(8),dp(4),dp(8),dp(4));setOnClickListener{action()}}
     private fun rounded(color:Int,radius:Int)=android.graphics.drawable.GradientDrawable().apply{setColor(color);cornerRadius=dp(radius).toFloat()}
     private fun margin(w:Int,h:Int,l:Int,t:Int,r:Int,b:Int)=LinearLayout.LayoutParams(w,h).apply{setMargins(l,t,r,b)}
     private fun hasCameraPermission()=ContextCompat.checkSelfPermission(this,Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED
